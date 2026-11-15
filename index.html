@@ -1,0 +1,2030 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>双生林 · 双人合作解谜跳跃</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 34%, #1c301d 0%, #101a11 48%, #070c08 100%);
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(ellipse at center, transparent 54%, rgba(0, 0, 0, 0.42) 100%);
+    z-index: 2;
+  }
+
+  .stage {
+    position: relative;
+    width: min(100vw, 177.7778vh);
+    aspect-ratio: 16 / 9;
+    max-height: 100vh;
+    filter: drop-shadow(0 26px 55px rgba(0, 0, 0, 0.68));
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: clamp(0px, 1.1vw, 14px);
+    background: #1a2a1a;
+    outline: none;
+    cursor: default;
+  }
+
+  noscript {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    padding: 18px 24px;
+    color: #f7e8a4;
+    background: #122013;
+    border: 1px solid #456b46;
+    border-radius: 12px;
+  }
+</style>
+</head>
+<body>
+  <main class="stage" aria-label="双生林双人合作解谜跳跃游戏">
+    <canvas
+      id="game"
+      width="1280"
+      height="720"
+      tabindex="0"
+      aria-label="游戏画面。玩家一使用 A D W；玩家二使用方向键。目标：让两名角色同时踩下红蓝机关，再一起抵达右上方出口。"
+    ></canvas>
+  </main>
+  <noscript>这个游戏需要启用 JavaScript 才能运行。</noscript>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  // 基础设置
+  // ============================================================
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;   // 1280
+  const H = canvas.height;  // 720
+
+  const GRAVITY = 0.5;
+  const MAX_FALL = 15;
+  const STEP_MS = 1000 / 60;
+
+  const COLORS = {
+    background: "#1a2a1a",
+    platform: "#5c4033",
+    grass: "#2e8b57",
+    big: "#FFD700",
+    small: "#FFA500",
+    red: "#ff5b64",
+    redDark: "#a92c36",
+    blue: "#58b9ff",
+    blueDark: "#226b9c",
+    door: "#2e8b57",
+    doorLight: "#77e6a4",
+    gold: "#ffd977",
+    ink: "#08110a"
+  };
+
+  // 所有会占用键盘、需要阻止浏览器默认行为的键。
+  const GAME_CODES = new Set([
+    "KeyA", "KeyD", "KeyW", "KeyR",
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"
+  ]);
+
+  // ============================================================
+  // 关卡数据
+  // ============================================================
+
+  // 每一个平台都是 AABB 实体：x, y 是左上角，w / h 是宽高。
+  const PLATFORMS = [
+    { id: "ground",      x: 0,    y: 660, w: 620, h: 60 },
+    { id: "start",       x: 110,  y: 430, w: 200, h: 20 },
+    { id: "overhang",    x: 130,  y: 560, w: 160, h: 50 },
+    { id: "midA",        x: 320,  y: 570, w: 180, h: 20 },
+    { id: "midB",        x: 540,  y: 480, w: 160, h: 20 },
+    { id: "bluePlat",    x: 780,  y: 360, w: 170, h: 20 },
+    { id: "crawlFloor",  x: 740,  y: 430, w: 330, h: 20 },
+    { id: "slitWall",    x: 950,  y: 320, w: 30,  h: 75, wall: true },
+    { id: "doorPlat",    x: 1070, y: 340, w: 210, h: 20 }
+  ];
+
+  // 压力板：宽度 60，高度 10。它们也是实体，角色可以真正站上去。
+  const RED_PLATE = {
+    id: "red",
+    x: 180, y: 650, w: 60, h: 10,
+    color: COLORS.red,
+    dark: COLORS.redDark,
+    label: "红机关",
+    isPlate: true
+  };
+
+  const BLUE_PLATE = {
+    id: "blue",
+    x: 830, y: 350, w: 60, h: 10,
+    color: COLORS.blue,
+    dark: COLORS.blueDark,
+    label: "蓝机关",
+    isPlate: true
+  };
+
+  const PLATES = [RED_PLATE, BLUE_PLATE];
+
+  // 出口门：宽 60，高 100，位于右上最高平台的边缘。
+  const DOOR = {
+    x: 1120, y: 240, w: 60, h: 100
+  };
+
+  // 门后的终点区域（仅用于绘制和判定）。
+  const GOAL = {
+    x: 1180, y: 240, w: 100, h: 100,
+    arriveX: 1184
+  };
+
+  const DOOR_PLATFORM = PLATFORMS.find(p => p.id === "doorPlat");
+
+  // 所有固定实体。门会根据开关状态动态加入或移除。
+  const BASE_SOLIDS = [...PLATFORMS, RED_PLATE, BLUE_PLATE];
+  const SOLIDS_WITH_DOOR = [...BASE_SOLIDS, DOOR];
+
+  // 预生成草皮、石头纹理参数，避免每帧随机导致闪烁。
+  function hash(n) {
+    const value = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
+    return value - Math.floor(value);
+  }
+
+  PLATFORMS.forEach((platform, index) => {
+    platform.tufts = [];
+    const tuftCount = Math.max(3, Math.floor(platform.w / 19));
+    for (let i = 0; i < tuftCount; i++) {
+      platform.tufts.push({
+        x: 4 + (platform.w - 8) * ((i + 0.35) / tuftCount),
+        h: 2 + hash(index * 37 + i * 13) * 5,
+        lean: (hash(index * 17 + i * 7) - 0.5) * 3
+      });
+    }
+
+    platform.cracks = [];
+    const crackCount = Math.max(1, Math.floor(platform.w / 80));
+    for (let i = 0; i < crackCount; i++) {
+      platform.cracks.push({
+        x: 14 + hash(index * 61 + i * 23) * Math.max(10, platform.w - 28),
+        y: 14 + hash(index * 83 + i * 11) * Math.max(4, platform.h - 18),
+        len: 5 + hash(index * 29 + i * 5) * 12,
+        angle: (hash(index * 7 + i * 19) - 0.5) * 0.8
+      });
+    }
+  });
+
+  // ============================================================
+  // 输入与游戏状态
+  // ============================================================
+
+  const held = new Set();
+  const particles = [];
+
+  const G = {
+    state: "playing",       // playing | won
+    time: 0,
+    winTime: 0,
+    redPressed: false,
+    bluePressed: false,
+    syncProgress: 0,
+    doorOpen: false,
+    doorUnlocked: false,
+    resetFlash: 0,
+    unlockPulse: 0,
+    toast: { text: "", timer: 0, maxTimer: 0, color: "#fff" }
+  };
+
+  // 双人同步踩住机关的时间：48 帧 = 0.8 秒。
+  // 设计说明：如果门在任意一人离开机关时永远立即关闭，
+  // 两个人就不可能同时穿过同一扇远处的门并抵达门后终点。
+  // 因此这里采用“同步充能后永久解锁”的规则：
+  // 充能期间任一机关没人，门都会立刻重新关闭；充能完成后门保持开启。
+  const UNLOCK_FRAMES = 48;
+
+  let player1 = null;
+  let player2 = null;
+
+  function createPlayer(config) {
+    return {
+      x: config.spawnX,
+      y: config.spawnY,
+      w: config.w,
+      h: config.h,
+      vx: 0,
+      vy: 0,
+      speed: config.speed,
+      jumpForce: config.jumpForce,
+      color: config.color,
+      accent: config.accent,
+      name: config.name,
+      facing: 1,
+      grounded: false,
+      coyote: 0,
+      jumpBuffer: 0,
+      moving: false
+    };
+  }
+
+  const P1_CONFIG = {
+    spawnX: 64,
+    spawnY: 600,        // 大黄：Y = 600
+    w: 30,
+    h: 60,
+    speed: 4,
+    jumpForce: -12,
+    color: COLORS.big,
+    accent: "#6f5000",
+    name: "大黄"
+  };
+
+  const P2_CONFIG = {
+    spawnX: 188,
+    spawnY: 400,        // 小黄：Y = 400，站在悬浮平台上
+    w: 30,
+    h: 30,
+    speed: 5,
+    jumpForce: -10,
+    color: COLORS.small,
+    accent: "#713c00",
+    name: "小黄"
+  };
+
+  // ============================================================
+  // 小工具
+  // ============================================================
+
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+  function aabb(a, b) {
+    return (
+      a.x < b.x + b.w &&
+      a.x + a.w > b.x &&
+      a.y < b.y + b.h &&
+      a.y + a.h > b.y
+    );
+  }
+
+  function roundRectPath(x, y, w, h, radius) {
+    const r = Math.min(radius, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function showToast(text, duration = 2.2, color = "#fff4c7") {
+    G.toast.text = text;
+    G.toast.timer = duration;
+    G.toast.maxTimer = duration;
+    G.toast.color = color;
+  }
+
+  // ============================================================
+  // 玩家与关卡重置
+  // ============================================================
+
+  function resetLevel(options = {}) {
+    const { fell = false, silent = false } = options;
+
+    player1 = createPlayer(P1_CONFIG);
+    player2 = createPlayer(P2_CONFIG);
+
+    G.state = "playing";
+    G.winTime = 0;
+    G.redPressed = false;
+    G.bluePressed = false;
+    G.syncProgress = 0;
+    G.doorOpen = false;
+    G.doorUnlocked = false;
+    G.unlockPulse = 0;
+    G.resetFlash = fell ? 1 : 0;
+    G.toast.timer = 0;
+    held.clear();
+    particles.length = 0;
+
+    if (fell) {
+      showToast("坠入深林……关卡已重置", 2.4, "#ffd0a6");
+    } else if (!silent) {
+      showToast("关卡已重置", 1.4, "#d8f5d4");
+    }
+  }
+
+  // ============================================================
+  // 输入处理：支持多键同时按下
+  // ============================================================
+
+  window.addEventListener("keydown", (event) => {
+    const code = event.code;
+
+    if (GAME_CODES.has(code)) {
+      event.preventDefault();
+    }
+
+    if (event.repeat) return;
+
+    if (code === "KeyR") {
+      resetLevel();
+      return;
+    }
+
+    if (G.state !== "playing") return;
+
+    if (code === "KeyW") {
+      player1.jumpBuffer = 8;
+    } else if (code === "ArrowUp") {
+      player2.jumpBuffer = 8;
+    }
+
+    held.add(code);
+  }, { passive: false });
+
+  window.addEventListener("keyup", (event) => {
+    if (GAME_CODES.has(event.code)) {
+      event.preventDefault();
+    }
+    held.delete(event.code);
+  }, { passive: false });
+
+  window.addEventListener("blur", () => {
+    held.clear();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) held.clear();
+  });
+
+  canvas.addEventListener("pointerdown", () => {
+    canvas.focus();
+    if (G.state === "won") resetLevel();
+  });
+
+  // ============================================================
+  // 物理：水平、垂直碰撞与角色互推
+  // ============================================================
+
+  function getSolids() {
+    return G.doorOpen ? BASE_SOLIDS : SOLIDS_WITH_DOOR;
+  }
+
+  function clampToScreen(p) {
+    if (p.x < 0) {
+      p.x = 0;
+      if (p.vx < 0) p.vx = 0;
+    } else if (p.x + p.w > W) {
+      p.x = W - p.w;
+      if (p.vx > 0) p.vx = 0;
+    }
+  }
+
+  // 水平方向逐轴解算，避免角色卡入平台或门。
+  function resolveHorizontal(p, solids, direction) {
+    clampToScreen(p);
+
+    for (let pass = 0; pass < 3; pass++) {
+      let collided = false;
+
+      for (const solid of solids) {
+        // 压力板只有 10px 高，作为一步小台阶处理：不从侧面挡住角色，
+        // 让角色可以自然地走上去，再由垂直碰撞把脚底抬到板面。
+        if (solid.isPlate) continue;
+        if (!aabb(p, solid)) continue;
+        collided = true;
+
+        if (direction > 0) {
+          p.x = solid.x - p.w;
+        } else if (direction < 0) {
+          p.x = solid.x + solid.w;
+        } else {
+          const pushLeft = (p.x + p.w) - solid.x;
+          const pushRight = (solid.x + solid.w) - p.x;
+          p.x = pushLeft < pushRight ? solid.x - p.w : solid.x + solid.w;
+        }
+
+        clampToScreen(p);
+      }
+
+      if (!collided) break;
+    }
+  }
+
+  // 垂直方向逐轴解算，保证准确落在平台上，不穿模。
+  function resolveVertical(p, solids) {
+    p.grounded = false;
+
+    for (let pass = 0; pass < 3; pass++) {
+      let collided = false;
+
+      for (const solid of solids) {
+        if (!aabb(p, solid)) continue;
+        collided = true;
+
+        if (p.vy > 0) {
+          p.y = solid.y - p.h;
+          p.vy = 0;
+          p.grounded = true;
+        } else if (p.vy < 0) {
+          p.y = solid.y + solid.h;
+          p.vy = 0;
+        } else {
+          const pushUp = (p.y + p.h) - solid.y;
+          const pushDown = (solid.y + solid.h) - p.y;
+          if (pushUp < pushDown) {
+            p.y = solid.y - p.h;
+            p.grounded = true;
+          } else {
+            p.y = solid.y + solid.h;
+          }
+        }
+      }
+
+      if (!collided) break;
+    }
+  }
+
+  function updatePlayer(p, input, solids) {
+    const wasGrounded = p.grounded;
+    const fallSpeedBeforeLanding = p.vy;
+
+    p.jumpBuffer = Math.max(0, p.jumpBuffer - 1);
+    p.coyote = p.grounded ? 6 : Math.max(0, p.coyote - 1);
+
+    // 同时按左和右时互相抵消，避免“同时按键”导致角色抖动或突然加速。
+    let direction = 0;
+    if (input.left && !input.right) direction = -1;
+    else if (input.right && !input.left) direction = 1;
+
+    p.vx = direction * p.speed;
+    p.moving = direction !== 0;
+    if (direction !== 0) p.facing = direction;
+
+    // 跳跃使用缓冲 + 土狼时间，手感更稳定；第一帧严格使用设定跳跃力。
+    if (p.jumpBuffer > 0 && p.coyote > 0) {
+      p.vy = p.jumpForce;
+      p.grounded = false;
+      p.coyote = 0;
+      p.jumpBuffer = 0;
+      spawnJumpParticles(p);
+    } else {
+      p.vy = Math.min(p.vy + GRAVITY, MAX_FALL);
+    }
+
+    // --- 水平移动 ---
+    p.x += p.vx;
+    resolveHorizontal(p, solids, p.vx);
+
+    // --- 垂直移动 ---
+    p.y += p.vy;
+    resolveVertical(p, solids);
+
+    // 不允许从画布顶边逃出去。
+    if (p.y < 0) {
+      p.y = 0;
+      if (p.vy < 0) p.vy = 0;
+    }
+
+    // 落地尘土
+    if (!wasGrounded && p.grounded && fallSpeedBeforeLanding > 3) {
+      spawnLandingParticles(p);
+    }
+
+    // 跑步尘土（限制频率，避免粒子过多）
+    if (p.grounded && p.moving && Math.floor(G.time * 60) % 9 === 0) {
+      spawnRunDust(p);
+    }
+  }
+
+  // 将两个角色的 AABB 分离。优先水平推开，垂直重叠更明显时允许短暂叠在头顶。
+  function shiftPlayerX(p, dx, solids) {
+    if (dx === 0) return;
+    p.x += dx;
+    resolveHorizontal(p, solids, dx);
+  }
+
+  function resolvePlayerOverlap(solids) {
+    for (let iteration = 0; iteration < 6; iteration++) {
+      const overlapX = Math.min(player1.x + player1.w, player2.x + player2.w) -
+        Math.max(player1.x, player2.x);
+      const overlapY = Math.min(player1.y + player1.h, player2.y + player2.h) -
+        Math.max(player1.y, player2.y);
+
+      if (overlapX <= 0.01 || overlapY <= 0.01) return;
+
+      if (overlapX <= overlapY) {
+        const dir = (player1.x + player1.w / 2) < (player2.x + player2.w / 2) ? -1 : 1;
+        const half = overlapX / 2 + 0.02;
+        shiftPlayerX(player1, dir * half, solids);
+        shiftPlayerX(player2, -dir * half, solids);
+      } else {
+        // 一个角色落到另一个头上时，让被压住的人保持在地上。
+        if (player1.y + player1.h / 2 < player2.y + player2.h / 2) {
+          player1.y = player2.y - player1.h - 0.02;
+          if (player1.vy > 0) player1.vy = 0;
+          player1.grounded = true;
+        } else {
+          player2.y = player1.y - player2.h - 0.02;
+          if (player2.vy > 0) player2.vy = 0;
+          player2.grounded = true;
+        }
+      }
+    }
+
+    // 极端情况下（例如两人同时被夹在墙边）再做一次强制横向分离。
+    const overlapX = Math.min(player1.x + player1.w, player2.x + player2.w) -
+      Math.max(player1.x, player2.x);
+    const overlapY = Math.min(player1.y + player1.h, player2.y + player2.h) -
+      Math.max(player1.y, player2.y);
+
+    if (overlapX > 0 && overlapY > 0) {
+      const dir = (player1.x + player1.w / 2) < (player2.x + player2.w / 2) ? -1 : 1;
+      shiftPlayerX(player1, dir * overlapX, solids);
+      shiftPlayerX(player2, -dir * overlapX, solids);
+    }
+  }
+
+  // ============================================================
+  // 机关、门与胜利判定
+  // ============================================================
+
+  function isOnPlate(p, plate) {
+    const overlapX = Math.min(p.x + p.w, plate.x + plate.w) -
+      Math.max(p.x, plate.x);
+
+    if (overlapX < Math.min(14, plate.w * 0.35)) return false;
+
+    // 角色脚底与压力板顶面几乎重合，才算“站在开关上”。
+    return Math.abs((p.y + p.h) - plate.y) <= 1.5;
+  }
+
+  function updateSwitches() {
+    G.redPressed = isOnPlate(player1, RED_PLATE) || isOnPlate(player2, RED_PLATE);
+    G.bluePressed = isOnPlate(player1, BLUE_PLATE) || isOnPlate(player2, BLUE_PLATE);
+
+    const bothPressed = G.redPressed && G.bluePressed;
+
+    if (G.doorUnlocked) {
+      G.doorOpen = true;
+      G.syncProgress = UNLOCK_FRAMES;
+      return;
+    }
+
+    if (bothPressed) {
+      G.syncProgress = Math.min(UNLOCK_FRAMES, G.syncProgress + 1);
+      G.doorOpen = true;
+
+      if (G.syncProgress >= UNLOCK_FRAMES) {
+        G.doorUnlocked = true;
+        G.doorOpen = true;
+        G.unlockPulse = 1;
+        showToast("机关锁定完成！出口已永久开启", 2.8, "#9ef4b9");
+        spawnUnlockBurst();
+      }
+    } else {
+      // 充能未完成时，只要有一块板上没人，门就立刻重新出现。
+      G.syncProgress = 0;
+      G.doorOpen = false;
+    }
+  }
+
+  function isAtGoal(p) {
+    const feet = p.y + p.h;
+    return (
+      G.doorUnlocked &&
+      p.x >= GOAL.arriveX &&
+      feet >= DOOR_PLATFORM.y - 2 &&
+      feet <= DOOR_PLATFORM.y + 3
+    );
+  }
+
+  function checkWin() {
+    if (G.state !== "playing") return;
+
+    if (isAtGoal(player1) && isAtGoal(player2)) {
+      G.state = "won";
+      G.winTime = 0;
+      player1.vx = 0;
+      player1.vy = 0;
+      player2.vx = 0;
+      player2.vy = 0;
+      held.clear();
+      spawnWinConfetti();
+    }
+  }
+
+  // ============================================================
+  // 主更新
+  // ============================================================
+
+  function update() {
+    G.time += 1 / 60;
+
+    if (G.resetFlash > 0) G.resetFlash = Math.max(0, G.resetFlash - 0.025);
+    if (G.unlockPulse > 0) G.unlockPulse = Math.max(0, G.unlockPulse - 0.012);
+
+    if (G.toast.timer > 0) {
+      G.toast.timer = Math.max(0, G.toast.timer - 1 / 60);
+    }
+
+    updateParticles();
+
+    if (G.state === "won") {
+      G.winTime += 1 / 60;
+      return;
+    }
+
+    const solids = getSolids();
+
+    updatePlayer(player1, {
+      left: held.has("KeyA"),
+      right: held.has("KeyD")
+    }, solids);
+
+    updatePlayer(player2, {
+      left: held.has("ArrowLeft"),
+      right: held.has("ArrowRight")
+    }, solids);
+
+    resolvePlayerOverlap(solids);
+    updateSwitches();
+
+    // 掉出屏幕底部后重置整关。
+    if (player1.y > H || player2.y > H) {
+      resetLevel({ fell: true });
+      return;
+    }
+
+    checkWin();
+  }
+
+  // ============================================================
+  // 粒子特效
+  // ============================================================
+
+  function addParticle(options) {
+    if (particles.length > 320) particles.shift();
+
+    particles.push({
+      x: options.x,
+      y: options.y,
+      vx: options.vx || 0,
+      vy: options.vy || 0,
+      gravity: options.gravity ?? 0.06,
+      drag: options.drag ?? 0.985,
+      life: options.life ?? 30,
+      maxLife: options.life ?? 30,
+      size: options.size ?? 3,
+      color: options.color ?? "#ffffff",
+      glow: options.glow ?? false,
+      shape: options.shape ?? "circle",
+      spin: options.spin ?? 0,
+      angle: options.angle ?? 0
+    });
+  }
+
+  function spawnJumpParticles(p) {
+    for (let i = 0; i < 7; i++) {
+      addParticle({
+        x: p.x + p.w / 2 + (Math.random() - 0.5) * 12,
+        y: p.y + p.h - 2,
+        vx: (Math.random() - 0.5) * 2.4,
+        vy: -Math.random() * 1.8,
+        gravity: 0.045,
+        life: 18 + Math.random() * 12,
+        size: 2 + Math.random() * 2.5,
+        color: i % 2 === 0 ? "#d7efb2" : "#86b67a",
+        glow: false
+      });
+    }
+  }
+
+  function spawnLandingParticles(p) {
+    for (let i = 0; i < 8; i++) {
+      addParticle({
+        x: p.x + p.w / 2 + (Math.random() - 0.5) * 22,
+        y: p.y + p.h - 1,
+        vx: (Math.random() - 0.5) * 3.8,
+        vy: -Math.random() * 1.1,
+        gravity: 0.08,
+        life: 16 + Math.random() * 12,
+        size: 2 + Math.random() * 3,
+        color: i % 3 === 0 ? "#b9d99a" : "#6e8b64",
+        glow: false
+      });
+    }
+  }
+
+  function spawnRunDust(p) {
+    addParticle({
+      x: p.x + p.w / 2 + (p.facing < 0 ? 8 : -8),
+      y: p.y + p.h - 2,
+      vx: -p.facing * (0.3 + Math.random() * 0.7),
+      vy: -0.3 - Math.random() * 0.45,
+      gravity: 0.035,
+      life: 14 + Math.random() * 10,
+      size: 1.5 + Math.random() * 2,
+      color: "#7b8f68",
+      glow: false
+    });
+  }
+
+  function spawnUnlockBurst() {
+    const cx = DOOR.x + DOOR.w / 2;
+    const cy = DOOR.y + DOOR.h / 2;
+
+    for (let i = 0; i < 54; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 1.2 + Math.random() * 4.6;
+      addParticle({
+        x: cx + (Math.random() - 0.5) * 40,
+        y: cy + (Math.random() - 0.5) * 60,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        gravity: -0.005,
+        drag: 0.97,
+        life: 30 + Math.random() * 34,
+        size: 2 + Math.random() * 4,
+        color: i % 3 === 0 ? "#e5ffe9" : (i % 3 === 1 ? "#7af0a4" : "#ffd977"),
+        glow: true
+      });
+    }
+
+    for (const plate of PLATES) {
+      for (let i = 0; i < 12; i++) {
+        addParticle({
+          x: plate.x + plate.w / 2 + (Math.random() - 0.5) * 28,
+          y: plate.y + 3,
+          vx: (Math.random() - 0.5) * 1.2,
+          vy: -1 - Math.random() * 2,
+          gravity: -0.01,
+          drag: 0.99,
+          life: 26 + Math.random() * 20,
+          size: 1.5 + Math.random() * 2.5,
+          color: plate.color,
+          glow: true
+        });
+      }
+    }
+  }
+
+  function spawnWinConfetti() {
+    const colors = ["#FFD700", "#FFA500", "#7af0a4", "#58b9ff", "#ff8fa1", "#fff1b8"];
+
+    for (let i = 0; i < 130; i++) {
+      addParticle({
+        x: W / 2 + (Math.random() - 0.5) * 620,
+        y: 120 + Math.random() * 180,
+        vx: (Math.random() - 0.5) * 5,
+        vy: -1 - Math.random() * 4,
+        gravity: 0.08,
+        drag: 0.995,
+        life: 110 + Math.random() * 90,
+        size: 3 + Math.random() * 5,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        glow: Math.random() < 0.2,
+        shape: Math.random() < 0.45 ? "rect" : "circle",
+        spin: (Math.random() - 0.5) * 0.3,
+        angle: Math.random() * Math.PI
+      });
+    }
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const particle = particles[i];
+      particle.x += particle.vx;
+      particle.y += particle.vy;
+      particle.vx *= particle.drag;
+      particle.vy = particle.vy * particle.drag + particle.gravity;
+      particle.angle += particle.spin;
+      particle.life -= 1;
+
+      if (particle.life <= 0 || particle.y > H + 80 || particle.x < -100 || particle.x > W + 100) {
+        particles.splice(i, 1);
+      }
+    }
+  }
+
+  // ============================================================
+  // 背景绘制
+  // ============================================================
+
+  const FIREFLIES = Array.from({ length: 38 }, (_, i) => ({
+    x: 40 + hash(i * 13.7) * (W - 80),
+    y: 100 + hash(i * 31.1) * 500,
+    size: 1 + hash(i * 7.3) * 2.1,
+    phase: hash(i * 17.7) * Math.PI * 2,
+    speed: 0.35 + hash(i * 23.9) * 0.8,
+    drift: 8 + hash(i * 5.1) * 22
+  }));
+
+  const TREE_TRUNKS = [
+    { x: 46,  base: 690, w: 34, h: 390, crown: 100, alpha: 0.42 },
+    { x: 176, base: 700, w: 22, h: 300, crown: 76,  alpha: 0.26 },
+    { x: 386, base: 690, w: 28, h: 340, crown: 88,  alpha: 0.22 },
+    { x: 880, base: 690, w: 26, h: 320, crown: 92,  alpha: 0.20 },
+    { x: 1040, base: 700, w: 34, h: 420, crown: 108, alpha: 0.34 },
+    { x: 1218, base: 700, w: 30, h: 360, crown: 96,  alpha: 0.38 }
+  ];
+
+  function drawTree(tree) {
+    ctx.save();
+    ctx.globalAlpha = tree.alpha;
+    ctx.fillStyle = "#0b170d";
+
+    // 树干
+    ctx.beginPath();
+    ctx.moveTo(tree.x - tree.w / 2, tree.base);
+    ctx.lineTo(tree.x - tree.w * 0.28, tree.base - tree.h);
+    ctx.lineTo(tree.x + tree.w * 0.22, tree.base - tree.h);
+    ctx.lineTo(tree.x + tree.w / 2, tree.base);
+    ctx.closePath();
+    ctx.fill();
+
+    // 大块树冠
+    ctx.fillStyle = "#102313";
+    const crownY = tree.base - tree.h + 4;
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2;
+      const radius = tree.crown * (0.45 + hash(tree.x + i) * 0.3);
+      ctx.beginPath();
+      ctx.ellipse(
+        tree.x + Math.cos(angle) * tree.crown * 0.44,
+        crownY + Math.sin(angle) * tree.crown * 0.24,
+        radius,
+        radius * 0.7,
+        angle * 0.6,
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+    }
+
+    // 树冠中心亮部
+    ctx.globalAlpha = tree.alpha * 0.28;
+    ctx.fillStyle = "#2b4d2b";
+    ctx.beginPath();
+    ctx.ellipse(tree.x + 10, crownY + 12, tree.crown * 0.46, tree.crown * 0.24, 0.15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBackground(t) {
+    // 基础深森林绿
+    ctx.fillStyle = COLORS.background;
+    ctx.fillRect(0, 0, W, H);
+
+    // 上方更暗、下方略亮的森林空气透视
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, "rgba(5, 12, 7, 0.86)");
+    sky.addColorStop(0.42, "rgba(15, 31, 17, 0.22)");
+    sky.addColorStop(0.7, "rgba(18, 39, 22, 0.10)");
+    sky.addColorStop(1, "rgba(5, 12, 7, 0.92)");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    // 远处的月光雾气
+    const mist = ctx.createRadialGradient(760, 190, 20, 760, 190, 500);
+    mist.addColorStop(0, "rgba(112, 164, 107, 0.16)");
+    mist.addColorStop(0.48, "rgba(60, 105, 64, 0.07)");
+    mist.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = mist;
+    ctx.fillRect(0, 0, W, H);
+
+    // 背景树影
+    TREE_TRUNKS.forEach(drawTree);
+
+    // 横向雾气
+    const fog = ctx.createLinearGradient(0, 420, 0, 650);
+    fog.addColorStop(0, "rgba(94, 137, 94, 0)");
+    fog.addColorStop(0.5, "rgba(83, 128, 85, 0.055)");
+    fog.addColorStop(1, "rgba(10, 23, 13, 0.16)");
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, 390, W, 260);
+
+    // 顶部垂落藤蔓
+    drawVines(t);
+
+    // 萤火虫（背景层）
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const fly of FIREFLIES) {
+      const pulse = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(t * fly.speed + fly.phase));
+      const x = fly.x + Math.sin(t * 0.45 + fly.phase) * fly.drift;
+      const y = fly.y + Math.cos(t * 0.33 + fly.phase * 1.4) * fly.drift * 0.42;
+
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, 8 + fly.size * 3);
+      glow.addColorStop(0, `rgba(223, 250, 155, ${0.55 * pulse})`);
+      glow.addColorStop(0.4, `rgba(154, 225, 112, ${0.16 * pulse})`);
+      glow.addColorStop(1, "rgba(94, 180, 77, 0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(x, y, 8 + fly.size * 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = `rgba(245, 255, 198, ${0.7 * pulse})`;
+      ctx.beginPath();
+      ctx.arc(x, y, fly.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawVines(t) {
+    const vines = [
+      { x: 92,  len: 214, phase: 0.2 },
+      { x: 302, len: 160, phase: 1.8 },
+      { x: 672, len: 190, phase: 2.7 },
+      { x: 812, len: 118, phase: 4.2 },
+      { x: 1100, len: 154, phase: 3.3 }
+    ];
+
+    ctx.save();
+    ctx.lineCap = "round";
+    for (const vine of vines) {
+      const sway = Math.sin(t * 0.6 + vine.phase) * 7;
+      ctx.strokeStyle = "rgba(31, 69, 38, 0.58)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(vine.x, 0);
+      ctx.bezierCurveTo(
+        vine.x - 14, vine.len * 0.32,
+        vine.x + 18 + sway, vine.len * 0.65,
+        vine.x + sway, vine.len
+      );
+      ctx.stroke();
+
+      // 叶片
+      for (let i = 0; i < 4; i++) {
+        const p = 0.24 + i * 0.18;
+        const lx = vine.x + Math.sin(p * 3 + vine.phase) * 12 + sway * p;
+        const ly = vine.len * p;
+        ctx.fillStyle = i % 2 ? "rgba(47, 96, 51, 0.48)" : "rgba(60, 118, 65, 0.38)";
+        ctx.beginPath();
+        ctx.ellipse(lx + (i % 2 ? 7 : -7), ly, 8, 3, i % 2 ? 0.55 : -0.55, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ============================================================
+  // 平台、机关与门绘制
+  // ============================================================
+
+  function drawPlatform(platform) {
+    const { x, y, w, h } = platform;
+
+    // 投影
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+    roundRectPath(x + 5, y + 7, w, h, 4);
+    ctx.fill();
+
+    // 深棕色主体
+    ctx.fillStyle = COLORS.platform;
+    roundRectPath(x, y, w, h, 4);
+    ctx.fill();
+
+    // 主体明暗
+    const bodyGradient = ctx.createLinearGradient(0, y, 0, y + h);
+    bodyGradient.addColorStop(0, "rgba(255, 232, 190, 0.07)");
+    bodyGradient.addColorStop(0.28, "rgba(255, 255, 255, 0)");
+    bodyGradient.addColorStop(0.78, "rgba(0, 0, 0, 0.12)");
+    bodyGradient.addColorStop(1, "rgba(0, 0, 0, 0.34)");
+    ctx.fillStyle = bodyGradient;
+    roundRectPath(x, y, w, h, 4);
+    ctx.fill();
+
+    // 右侧暗部
+    ctx.fillStyle = "rgba(0, 0, 0, 0.13)";
+    ctx.fillRect(x + w - 7, y + 7, 7, Math.max(0, h - 7));
+
+    if (platform.wall) {
+      // 竖直岩壁：顶部只保留薄薄一层苔藓，避免被误认成一整块可站立平台。
+      ctx.fillStyle = "rgba(46, 139, 87, 0.8)";
+      ctx.fillRect(x, y, w, 4);
+      ctx.fillStyle = "rgba(120, 219, 143, 0.25)";
+      ctx.fillRect(x, y, w, 1.5);
+    } else {
+      // 顶部草皮边缘
+      ctx.fillStyle = COLORS.grass;
+      ctx.fillRect(x, y, w, Math.min(8, h));
+
+      ctx.fillStyle = "rgba(120, 219, 143, 0.38)";
+      ctx.fillRect(x, y, w, 2);
+
+      // 草叶
+      ctx.strokeStyle = "#56b071";
+      ctx.lineWidth = 1.4;
+      for (const tuft of platform.tufts) {
+        ctx.beginPath();
+        ctx.moveTo(x + tuft.x, y + 7);
+        ctx.quadraticCurveTo(
+          x + tuft.x + tuft.lean,
+          y + 7 - tuft.h * 0.65,
+          x + tuft.x + tuft.lean * 1.7,
+          y + 7 - tuft.h
+        );
+        ctx.stroke();
+      }
+    }
+
+    // 石缝
+    ctx.strokeStyle = "rgba(24, 15, 11, 0.28)";
+    ctx.lineWidth = 1;
+    for (const crack of platform.cracks) {
+      ctx.beginPath();
+      ctx.moveTo(x + crack.x, y + crack.y);
+      ctx.lineTo(
+        x + crack.x + Math.cos(crack.angle) * crack.len,
+        y + crack.y + Math.sin(crack.angle) * crack.len
+      );
+      ctx.stroke();
+    }
+
+    // 顶部细轮廓
+    ctx.strokeStyle = "rgba(7, 14, 8, 0.52)";
+    ctx.lineWidth = 1;
+    roundRectPath(x + 0.5, y + 0.5, w - 1, h - 1, 4);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPlate(plate, pressed, t) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 6 + (plate.id === "red" ? 0 : 1.6));
+
+    ctx.save();
+
+    // 外发光
+    ctx.shadowColor = plate.color;
+    ctx.shadowBlur = pressed ? 22 + pulse * 12 : 9;
+    ctx.globalAlpha = pressed ? 0.95 : 0.72;
+
+    // 底座（严格保持 60 × 10 的视觉尺寸）
+    ctx.fillStyle = "#1a1512";
+    roundRectPath(plate.x - 2, plate.y + 2, plate.w + 4, plate.h + 2, 3);
+    ctx.fill();
+
+    ctx.fillStyle = pressed ? plate.color : plate.dark;
+    roundRectPath(plate.x, plate.y, plate.w, plate.h, 3);
+    ctx.fill();
+
+    // 顶部高光
+    ctx.globalAlpha = pressed ? 0.8 : 0.35;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(plate.x + 5, plate.y + 1, plate.w - 10, 1.5);
+
+    // 两侧铆钉
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = "#f6ddbd";
+    ctx.beginPath();
+    ctx.arc(plate.x + 6, plate.y + plate.h / 2, 1.7, 0, Math.PI * 2);
+    ctx.arc(plate.x + plate.w - 6, plate.y + plate.h / 2, 1.7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    // 机关名称
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.font = '700 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = pressed ? plate.color : "rgba(232, 225, 210, 0.68)";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+    ctx.shadowBlur = 5;
+    ctx.fillText(plate.label, plate.x + plate.w / 2, plate.y - 8);
+    ctx.restore();
+
+    // 按下时向上飘的小粒子
+    if (pressed && Math.random() < 0.13) {
+      addParticle({
+        x: plate.x + Math.random() * plate.w,
+        y: plate.y - 2,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: -0.5 - Math.random() * 0.6,
+        gravity: -0.004,
+        life: 20 + Math.random() * 16,
+        size: 1.5 + Math.random() * 2,
+        color: plate.color,
+        glow: true
+      });
+    }
+  }
+
+  function drawGoal(t) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 2.2);
+
+    ctx.save();
+
+    if (G.doorUnlocked) {
+      ctx.globalAlpha = 0.88 + pulse * 0.12;
+    } else {
+      ctx.globalAlpha = 0.48 + pulse * 0.1;
+    }
+
+    // 门后圣光
+    const glow = ctx.createLinearGradient(GOAL.x, GOAL.y, GOAL.x + GOAL.w, GOAL.y + GOAL.h);
+    glow.addColorStop(0, "rgba(255, 212, 112, 0)");
+    glow.addColorStop(0.35, "rgba(255, 223, 130, 0.26)");
+    glow.addColorStop(0.65, "rgba(220, 255, 160, 0.17)");
+    glow.addColorStop(1, "rgba(255, 234, 162, 0.03)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(GOAL.x, GOAL.y, GOAL.w, GOAL.h);
+
+    // 竖向光柱
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 4; i++) {
+      const x = GOAL.x + 12 + i * 17 + Math.sin(t * 0.9 + i) * 3;
+      const beam = ctx.createLinearGradient(x, GOAL.y, x, GOAL.y + GOAL.h);
+      beam.addColorStop(0, "rgba(255, 242, 175, 0)");
+      beam.addColorStop(0.45, `rgba(255, 223, 127, ${0.08 + pulse * 0.035})`);
+      beam.addColorStop(1, "rgba(255, 245, 190, 0)");
+      ctx.fillStyle = beam;
+      ctx.fillRect(x, GOAL.y, 2 + (i % 2), GOAL.h);
+    }
+
+    // 门后的金色圣所拱门：即使门关着，也能看出终点在哪里。
+    ctx.globalCompositeOperation = "source-over";
+    ctx.strokeStyle = G.doorUnlocked
+      ? `rgba(255, 230, 148, ${0.56 + pulse * 0.16})`
+      : "rgba(255, 226, 148, 0.34)";
+    ctx.lineWidth = 2;
+    ctx.shadowColor = "rgba(255, 206, 93, 0.5)";
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.moveTo(GOAL.x + 10, GOAL.y + GOAL.h - 3);
+    ctx.lineTo(GOAL.x + 10, GOAL.y + 44);
+    ctx.quadraticCurveTo(GOAL.x + GOAL.w / 2, GOAL.y + 3, GOAL.x + GOAL.w - 10, GOAL.y + 44);
+    ctx.lineTo(GOAL.x + GOAL.w - 10, GOAL.y + GOAL.h - 3);
+    ctx.stroke();
+
+    // 中央的叶形符文
+    ctx.globalAlpha *= 0.8;
+    ctx.fillStyle = G.doorUnlocked
+      ? `rgba(255, 239, 173, ${0.18 + pulse * 0.1})`
+      : "rgba(255, 235, 164, 0.08)";
+    ctx.beginPath();
+    ctx.ellipse(GOAL.x + GOAL.w / 2, GOAL.y + 56, 9, 22, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 终点铭文
+    ctx.textAlign = "center";
+    ctx.font = '700 13px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = G.doorUnlocked
+      ? `rgba(255, 245, 192, ${0.86 + pulse * 0.14})`
+      : "rgba(237, 226, 177, 0.56)";
+    ctx.shadowColor = "rgba(255, 211, 105, 0.6)";
+    ctx.shadowBlur = 12;
+    ctx.fillText("终 点", GOAL.x + GOAL.w / 2, GOAL.y + 26);
+
+    // 金色光点
+    for (let i = 0; i < 9; i++) {
+      const px = GOAL.x + 12 + hash(i * 5.7) * (GOAL.w - 24);
+      const py = GOAL.y + 18 + ((t * 16 + hash(i * 9.1) * 100) % (GOAL.h - 30));
+      ctx.globalAlpha = (0.18 + 0.3 * Math.sin(t * 2 + i)) * (G.doorUnlocked ? 1 : 0.45);
+      ctx.fillStyle = "#ffe9a3";
+      ctx.beginPath();
+      ctx.arc(px, py, 1.3 + (i % 3) * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawDoor(t) {
+    const { x, y, w, h } = DOOR;
+    const charging = G.syncProgress > 0 && !G.doorUnlocked;
+    const pulse = 0.5 + 0.5 * Math.sin(t * 4.8);
+
+    ctx.save();
+
+    if (G.doorOpen) {
+      // 门已经消失：只留下绿色传送门的光框和光流。
+      ctx.globalCompositeOperation = "lighter";
+
+      const portalGlow = ctx.createRadialGradient(
+        x + w / 2, y + h / 2, 2,
+        x + w / 2, y + h / 2, 88
+      );
+      portalGlow.addColorStop(0, "rgba(174, 255, 201, 0.40)");
+      portalGlow.addColorStop(0.32, "rgba(90, 235, 145, 0.22)");
+      portalGlow.addColorStop(1, "rgba(45, 207, 110, 0)");
+      ctx.fillStyle = portalGlow;
+      ctx.fillRect(x - 55, y - 55, w + 110, h + 110);
+
+      const inner = ctx.createLinearGradient(x, y, x + w, y + h);
+      inner.addColorStop(0, "rgba(110, 255, 167, 0.04)");
+      inner.addColorStop(0.5, `rgba(130, 255, 179, ${0.14 + pulse * 0.08})`);
+      inner.addColorStop(1, "rgba(74, 225, 125, 0.03)");
+      ctx.fillStyle = inner;
+      ctx.fillRect(x + 3, y + 4, w - 6, h - 4);
+
+      // 流动的竖向光线
+      for (let i = 0; i < 5; i++) {
+        const lx = x + 9 + i * 10;
+        const offset = (t * 48 + i * 23) % (h + 32);
+        ctx.strokeStyle = `rgba(183, 255, 204, ${0.16 + (i % 2) * 0.1})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(lx, y + h - offset);
+        ctx.lineTo(lx, y + h - offset + 18);
+        ctx.stroke();
+      }
+
+      // 门框
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = "rgba(132, 247, 169, 0.70)";
+      ctx.lineWidth = 2;
+      roundRectPath(x, y, w, h, 13);
+      ctx.stroke();
+
+      // 四个角落的小光点
+      ctx.fillStyle = "#d9ffe3";
+      for (const [px, py] of [[x, y + 18], [x + w, y + 18], [x, y + h - 18], [x + w, y + h - 18]]) {
+        ctx.globalAlpha = 0.4 + pulse * 0.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.globalAlpha = 1;
+      ctx.textAlign = "center";
+      ctx.font = '700 12px "Microsoft YaHei", "PingFang SC", sans-serif';
+      ctx.fillStyle = "rgba(196, 255, 212, 0.88)";
+      ctx.shadowColor = "rgba(100, 255, 155, 0.7)";
+      ctx.shadowBlur = 10;
+      ctx.fillText(G.doorUnlocked ? "出口 · 已开启" : "出口 · 开启中", x + w / 2, y - 10);
+      ctx.restore();
+      return;
+    }
+
+    // 关闭状态：一扇结实的绿色门
+    ctx.shadowColor = "rgba(64, 238, 126, 0.46)";
+    ctx.shadowBlur = charging ? 22 + pulse * 14 : 10;
+
+    // 门框外沿
+    ctx.fillStyle = "#173425";
+    roundRectPath(x - 3, y - 4, w + 6, h + 7, 16);
+    ctx.fill();
+
+    const doorGradient = ctx.createLinearGradient(x, y, x + w, y + h);
+    doorGradient.addColorStop(0, "#4cc777");
+    doorGradient.addColorStop(0.36, COLORS.door);
+    doorGradient.addColorStop(1, "#1b5a38");
+    ctx.fillStyle = doorGradient;
+    roundRectPath(x, y, w, h, 13);
+    ctx.fill();
+
+    // 木纹 / 金属拼板
+    ctx.strokeStyle = "rgba(8, 33, 18, 0.42)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + (h / 4) * i);
+      ctx.lineTo(x + w - 8, y + (h / 4) * i);
+      ctx.stroke();
+    }
+
+    // 中央叶子徽记
+    ctx.save();
+    ctx.translate(x + w / 2, y + h * 0.48);
+    ctx.fillStyle = "rgba(10, 50, 26, 0.5)";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 12, 18, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(166, 255, 187, 0.8)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(0, 12);
+    ctx.quadraticCurveTo(-2, 0, 0, -13);
+    ctx.moveTo(0, 5);
+    ctx.quadraticCurveTo(-9, 0, -10, -6);
+    ctx.moveTo(0, 3);
+    ctx.quadraticCurveTo(9, -2, 10, -8);
+    ctx.stroke();
+    ctx.restore();
+
+    // 铆钉
+    ctx.fillStyle = "rgba(207, 255, 218, 0.7)";
+    for (const [px, py] of [[x + 8, y + 12], [x + w - 8, y + 12], [x + 8, y + h - 12], [x + w - 8, y + h - 12]]) {
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 充能光纹
+    if (charging) {
+      ctx.globalAlpha = 0.25 + pulse * 0.25;
+      ctx.strokeStyle = "#b9ffd0";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y + h - 12);
+      ctx.lineTo(x + 18, y + h - 24);
+      ctx.lineTo(x + 10, y + 26);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "center";
+    ctx.font = '700 12px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(194, 255, 209, 0.9)";
+    ctx.shadowColor = "rgba(56, 225, 118, 0.75)";
+    ctx.shadowBlur = 9;
+    ctx.fillText(charging ? "充能中……" : "出 口", x + w / 2, y - 10);
+    ctx.restore();
+  }
+
+  // 两块压力板同时被踩时，连接门与机关的可见能量线。
+  function drawSwitchBeams(t) {
+    if (!G.redPressed || !G.bluePressed) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+
+    for (const plate of PLATES) {
+      const sx = plate.x + plate.w / 2;
+      const sy = plate.y + 2;
+      const tx = DOOR.x + DOOR.w / 2;
+      const ty = DOOR.y + DOOR.h * 0.55;
+
+      const controlX = (sx + tx) / 2;
+      const controlY = Math.min(sy, ty) - 150;
+
+      ctx.strokeStyle = plate.color;
+      ctx.globalAlpha = 0.16;
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(controlX, controlY, tx, ty);
+      ctx.stroke();
+
+      ctx.globalAlpha = 0.58;
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([4, 14]);
+      ctx.lineDashOffset = -t * 65;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(controlX, controlY, tx, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 光线上移动的小点
+      for (let i = 0; i < 4; i++) {
+        const q = ((t * 0.55 + i * 0.22) % 1);
+        const x = (1 - q) * (1 - q) * sx + 2 * (1 - q) * q * controlX + q * q * tx;
+        const y = (1 - q) * (1 - q) * sy + 2 * (1 - q) * q * controlY + q * q * ty;
+        ctx.fillStyle = plate.color;
+        ctx.globalAlpha = 0.75;
+        ctx.beginPath();
+        ctx.arc(x, y, 2 + Math.sin(t * 5 + i) * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // ============================================================
+  // 角色绘制
+  // ============================================================
+
+  function drawPlayerBody(p, isBig, t) {
+    const x = p.x;
+    const y = p.y;
+    const w = p.w;
+    const h = p.h;
+    const movingBounce = p.moving && p.grounded
+      ? Math.sin(t * 18) * 1.2
+      : Math.sin(t * 2.4 + (isBig ? 0 : 1.4)) * 0.55;
+
+    ctx.save();
+
+    // 脚下阴影
+    if (p.grounded) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.34)";
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, y + h + 1, w * 0.66, 4.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const bodyX = x;
+    const bodyY = y + movingBounce;
+    const gradient = ctx.createLinearGradient(bodyX, bodyY, bodyX + w, bodyY + h);
+    if (isBig) {
+      gradient.addColorStop(0, "#fff17a");
+      gradient.addColorStop(0.55, COLORS.big);
+      gradient.addColorStop(1, "#e2a900");
+    } else {
+      gradient.addColorStop(0, "#ffd16b");
+      gradient.addColorStop(0.58, COLORS.small);
+      gradient.addColorStop(1, "#e77d00");
+    }
+
+    // 身体
+    ctx.fillStyle = gradient;
+    ctx.strokeStyle = p.accent;
+    ctx.lineWidth = 2;
+    roundRectPath(bodyX, bodyY, w, h, isBig ? 10 : 11);
+    ctx.fill();
+    ctx.stroke();
+
+    // 左侧高光
+    ctx.fillStyle = "rgba(255, 255, 255, 0.28)";
+    roundRectPath(bodyX + 4, bodyY + 5, 5, Math.max(7, h - 16), 3);
+    ctx.fill();
+
+    // 小脚 / 小短腿
+    if (p.grounded && p.moving) {
+      const legSwing = Math.sin(t * 18) * 3;
+      ctx.fillStyle = isBig ? "#a97f00" : "#a85c00";
+      roundRectPath(bodyX + 4, bodyY + h - 4, 8, 4 + legSwing, 2);
+      ctx.fill();
+      roundRectPath(bodyX + w - 12, bodyY + h - 4, 8, 4 - legSwing, 2);
+      ctx.fill();
+    }
+
+    // 面部
+    const faceY = isBig ? bodyY + 15 : bodyY + 9;
+    const eyeOffset = p.facing * 2.4;
+    const blink = (Math.sin(t * 1.9 + (isBig ? 2.1 : 4.0)) > 0.975) ? 0.16 : 1;
+
+    // 眼白
+    ctx.fillStyle = "rgba(255, 252, 225, 0.95)";
+    ctx.beginPath();
+    ctx.ellipse(bodyX + w * 0.36 + eyeOffset, faceY, isBig ? 4.2 : 4.7, 4.6 * blink, 0, 0, Math.PI * 2);
+    ctx.ellipse(bodyX + w * 0.68 + eyeOffset, faceY, isBig ? 4.2 : 4.7, 4.6 * blink, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 瞳孔
+    ctx.fillStyle = "#2a2109";
+    ctx.beginPath();
+    ctx.arc(bodyX + w * 0.36 + eyeOffset + p.facing * 0.9, faceY + 0.5, 2, 0, Math.PI * 2);
+    ctx.arc(bodyX + w * 0.68 + eyeOffset + p.facing * 0.9, faceY + 0.5, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 高光
+    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.beginPath();
+    ctx.arc(bodyX + w * 0.36 + eyeOffset - 0.6, faceY - 1.2, 0.8, 0, Math.PI * 2);
+    ctx.arc(bodyX + w * 0.68 + eyeOffset - 0.6, faceY - 1.2, 0.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 嘴巴
+    ctx.strokeStyle = "rgba(82, 49, 0, 0.8)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    if (Math.sin(t * 1.1 + (isBig ? 0 : 1)) > 0.35) {
+      ctx.arc(bodyX + w / 2 + eyeOffset, faceY + 8, 3.2, 0.15, Math.PI - 0.15);
+    } else {
+      ctx.moveTo(bodyX + w / 2 - 2.5 + eyeOffset, faceY + 9);
+      ctx.lineTo(bodyX + w / 2 + 2.5 + eyeOffset, faceY + 9);
+    }
+    ctx.stroke();
+
+    // 大黄的围巾 / 小黄的叶子帽，用来区分两个角色，不改变主体颜色。
+    if (isBig) {
+      ctx.fillStyle = "#2e8b57";
+      roundRectPath(bodyX + 3, bodyY + h - 18, w - 6, 5, 2.5);
+      ctx.fill();
+      ctx.fillStyle = "#3ca76b";
+      ctx.beginPath();
+      ctx.moveTo(bodyX + w - 6, bodyY + h - 16);
+      ctx.lineTo(bodyX + w + 5, bodyY + h - 10 + Math.sin(t * 5) * 1.5);
+      ctx.lineTo(bodyX + w - 5, bodyY + h - 8);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "#3c9a4f";
+      ctx.beginPath();
+      ctx.moveTo(bodyX + w * 0.48, bodyY - 1);
+      ctx.quadraticCurveTo(bodyX + w * 0.62, bodyY - 12, bodyX + w * 0.78, bodyY - 2);
+      ctx.quadraticCurveTo(bodyX + w * 0.6, bodyY + 2, bodyX + w * 0.48, bodyY - 1);
+      ctx.fill();
+      ctx.strokeStyle = "#1f6b32";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bodyX + w * 0.56, bodyY - 2);
+      ctx.lineTo(bodyX + w * 0.62, bodyY - 8);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawNameTag(p, isBig) {
+    const label = p.name;
+    const color = isBig ? "#ffe25c" : "#ffbc54";
+
+    ctx.save();
+    ctx.font = '700 10px "Microsoft YaHei", "PingFang SC", sans-serif';
+    const textWidth = ctx.measureText(label).width;
+    const boxW = textWidth + 16;
+    const boxH = 18;
+    const bx = p.x + p.w / 2 - boxW / 2;
+    const by = p.y - 25;
+
+    ctx.fillStyle = "rgba(5, 15, 8, 0.68)";
+    roundRectPath(bx, by, boxW, boxH, 8);
+    ctx.fill();
+    ctx.strokeStyle = isBig ? "rgba(255, 215, 0, 0.36)" : "rgba(255, 165, 0, 0.36)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, p.x + p.w / 2, by + boxH / 2 + 0.5);
+    ctx.restore();
+  }
+
+  function drawPlayers(t) {
+    drawPlayerBody(player1, true, t);
+    drawPlayerBody(player2, false, t);
+    drawNameTag(player1, true);
+    drawNameTag(player2, false);
+  }
+
+  // ============================================================
+  // 粒子与顶层氛围
+  // ============================================================
+
+  function drawParticles() {
+    ctx.save();
+
+    for (const particle of particles) {
+      const alpha = clamp(particle.life / particle.maxLife, 0, 1);
+
+      if (particle.glow) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = alpha * 0.3;
+        ctx.fillStyle = particle.color;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.size * 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalCompositeOperation = "source-over";
+      }
+
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = particle.color;
+
+      if (particle.shape === "rect") {
+        ctx.save();
+        ctx.translate(particle.x, particle.y);
+        ctx.rotate(particle.angle);
+        ctx.fillRect(-particle.size / 2, -particle.size, particle.size, particle.size * 2);
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function drawForegroundAtmosphere(t) {
+    // 极淡的近景萤火，让画面有纵深。
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 9; i++) {
+      const x = 80 + hash(i * 8.8) * 1120 + Math.sin(t * 0.3 + i) * 14;
+      const y = 330 + hash(i * 17.4) * 310 + Math.cos(t * 0.5 + i) * 8;
+      const alpha = 0.12 + 0.1 * (0.5 + 0.5 * Math.sin(t * 2 + i));
+      ctx.fillStyle = `rgba(214, 255, 159, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawVignette() {
+    const vignette = ctx.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, H * 0.8);
+    vignette.addColorStop(0, "rgba(0, 0, 0, 0)");
+    vignette.addColorStop(0.72, "rgba(0, 0, 0, 0.06)");
+    vignette.addColorStop(1, "rgba(0, 0, 0, 0.52)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+
+    if (G.resetFlash > 0) {
+      ctx.fillStyle = `rgba(143, 28, 23, ${G.resetFlash * 0.28})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  // ============================================================
+  // HUD
+  // ============================================================
+
+  function drawPanel(x, y, w, h, accent = "rgba(116, 189, 123, 0.28)") {
+    ctx.fillStyle = "rgba(6, 16, 9, 0.62)";
+    roundRectPath(x, y, w, h, 13);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(157, 219, 158, 0.18)";
+    ctx.lineWidth = 1;
+    roundRectPath(x + 0.5, y + 0.5, w - 1, h - 1, 13);
+    ctx.stroke();
+
+    ctx.fillStyle = accent;
+    roundRectPath(x + 12, y + 10, 3, h - 20, 2);
+    ctx.fill();
+  }
+
+  function drawKeyCap(label, x, y, width = 22, color = "#dcebd3") {
+    ctx.fillStyle = "rgba(238, 250, 231, 0.08)";
+    roundRectPath(x, y, width, 22, 5);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(221, 241, 210, 0.28)";
+    ctx.lineWidth = 1;
+    roundRectPath(x + 0.5, y + 0.5, width - 1, 21, 5);
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = '700 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillText(label, x + width / 2, y + 11.5);
+    return x + width;
+  }
+
+  function drawHUD(t) {
+    // ----- 左侧信息面板 -----
+    drawPanel(24, 22, 382, 170);
+
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+
+    ctx.font = '800 25px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "#e9f2c5";
+    ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+    ctx.shadowBlur = 8;
+    ctx.fillText("双生林", 46, 56);
+
+    ctx.shadowBlur = 0;
+    ctx.font = '500 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(190, 218, 176, 0.76)";
+    ctx.fillText("双人合作 · 机关解谜 · 单机双控", 131, 55);
+
+    ctx.font = '500 12px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(220, 236, 207, 0.8)";
+    ctx.fillText("同时踩住红、蓝机关，带两位伙伴抵达右上出口。", 46, 79);
+
+    // 大黄操作
+    ctx.fillStyle = COLORS.big;
+    ctx.beginPath();
+    ctx.arc(51, 104, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = '700 12px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "#f7e9ac";
+    ctx.fillText("大黄", 62, 108);
+
+    let keyX = 106;
+    ctx.font = '700 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    keyX = drawKeyCap("A", keyX, 92) + 4;
+    keyX = drawKeyCap("D", keyX, 92) + 6;
+    ctx.fillStyle = "rgba(223, 237, 210, 0.66)";
+    ctx.font = '500 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillText("移动", keyX, 107);
+
+    keyX = 211;
+    keyX = drawKeyCap("W", keyX, 92, 24) + 6;
+    ctx.fillStyle = "rgba(223, 237, 210, 0.66)";
+    ctx.fillText("跳跃", keyX, 107);
+
+    // 小黄操作
+    ctx.fillStyle = COLORS.small;
+    ctx.beginPath();
+    ctx.arc(51, 131, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = '700 12px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "#f7dfac";
+    ctx.fillText("小黄", 62, 135);
+
+    keyX = 106;
+    keyX = drawKeyCap("←", keyX, 119, 25) + 4;
+    keyX = drawKeyCap("→", keyX, 119, 25) + 6;
+    ctx.fillStyle = "rgba(223, 237, 210, 0.66)";
+    ctx.font = '500 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillText("移动", keyX, 134);
+
+    keyX = 211;
+    keyX = drawKeyCap("↑", keyX, 119, 24) + 6;
+    ctx.fillStyle = "rgba(223, 237, 210, 0.66)";
+    ctx.fillText("跳跃", keyX, 134);
+
+    // 底部提示
+    ctx.font = '500 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(174, 204, 166, 0.56)";
+    ctx.fillText("R 重开", 46, 166);
+    ctx.fillStyle = "rgba(174, 204, 166, 0.4)";
+    ctx.fillText("· 同时按左/右会互相抵消", 94, 166);
+
+    ctx.restore();
+
+    // ----- 右侧机关状态面板 -----
+    drawPanel(876, 22, 380, 140, "rgba(235, 197, 101, 0.25)");
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+
+    ctx.font = '700 13px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(230, 241, 209, 0.9)";
+    ctx.fillText("协作机关", 896, 46);
+
+    ctx.font = '500 10px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(174, 204, 166, 0.56)";
+    ctx.textAlign = "right";
+    ctx.fillText("压力板 / 出口", 1236, 46);
+
+    // 两块压力板状态
+    drawPlateStatus(896, 57, 158, "红机关", RED_PLATE, G.redPressed);
+    drawPlateStatus(1064, 57, 168, "蓝机关", BLUE_PLATE, G.bluePressed);
+
+    // 同步进度条
+    const barX = 896;
+    const barY = 99;
+    const barW = 336;
+    const barH = 7;
+    const progress = G.syncProgress / UNLOCK_FRAMES;
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
+    roundRectPath(barX, barY, barW, barH, 3.5);
+    ctx.fill();
+
+    if (progress > 0) {
+      const barGradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      barGradient.addColorStop(0, COLORS.red);
+      barGradient.addColorStop(0.5, "#ffd977");
+      barGradient.addColorStop(1, COLORS.blue);
+      ctx.fillStyle = barGradient;
+      roundRectPath(barX, barY, Math.max(4, barW * progress), barH, 3.5);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = "rgba(210, 231, 194, 0.16)";
+      ctx.lineWidth = 1;
+      roundRectPath(barX + 0.5, barY + 0.5, barW - 1, barH - 1, 3);
+      ctx.stroke();
+    }
+
+    // 门状态文案
+    ctx.textAlign = "left";
+    ctx.font = '500 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    if (G.doorUnlocked) {
+      ctx.fillStyle = "#97efb0";
+      ctx.fillText("出口：已永久开启 · 两人抵达门后终点", barX, 128);
+    } else if (G.redPressed && G.bluePressed) {
+      ctx.fillStyle = "#ffe39a";
+      ctx.fillText(`同步充能 ${(progress * 100).toFixed(0)}% · 保持踩住！`, barX, 128);
+    } else {
+      ctx.fillStyle = "rgba(191, 214, 181, 0.58)";
+      ctx.fillText("出口：关闭 · 需要两块压力板同时踩下", barX, 128);
+    }
+
+    ctx.restore();
+
+    // ----- 短暂提示 -----
+    if (G.toast.timer > 0) {
+      const alpha = Math.min(1, G.toast.timer / 0.4, (G.toast.maxTimer - G.toast.timer) / 0.2);
+      ctx.save();
+      ctx.globalAlpha = clamp(alpha, 0, 1);
+      ctx.font = '700 14px "Microsoft YaHei", "PingFang SC", sans-serif';
+      const tw = ctx.measureText(G.toast.text).width;
+      const padX = 18;
+      const boxW = tw + padX * 2;
+      const bx = W / 2 - boxW / 2;
+      const by = 188;
+
+      ctx.fillStyle = "rgba(7, 20, 10, 0.8)";
+      roundRectPath(bx, by, boxW, 34, 10);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(191, 237, 179, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = G.toast.color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(G.toast.text, W / 2, by + 18);
+      ctx.restore();
+    }
+  }
+
+  function drawPlateStatus(x, y, w, label, plate, pressed) {
+    ctx.save();
+
+    ctx.fillStyle = pressed ? "rgba(44, 73, 45, 0.82)" : "rgba(16, 33, 19, 0.72)";
+    roundRectPath(x, y, w, 30, 8);
+    ctx.fill();
+
+    if (pressed) {
+      ctx.shadowColor = plate.color;
+      ctx.shadowBlur = 12;
+    }
+    ctx.strokeStyle = pressed ? plate.color : "rgba(178, 208, 167, 0.18)";
+    ctx.lineWidth = pressed ? 1.5 : 1;
+    roundRectPath(x + 0.5, y + 0.5, w - 1, 29, 8);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // 指示灯
+    ctx.fillStyle = pressed ? plate.color : "rgba(183, 203, 173, 0.18)";
+    ctx.beginPath();
+    ctx.arc(x + 15, y + 15, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.font = '700 11px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = pressed ? "#f1ffdb" : "rgba(207, 226, 195, 0.58)";
+    ctx.fillText(label, x + 27, y + 15.5);
+
+    ctx.textAlign = "right";
+    ctx.font = '500 10px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = pressed ? plate.color : "rgba(184, 204, 172, 0.34)";
+    ctx.fillText(pressed ? "已踩下" : "未踩下", x + w - 12, y + 15.5);
+
+    ctx.restore();
+  }
+
+  // ============================================================
+  // 胜利画面
+  // ============================================================
+
+  function drawWinOverlay(t) {
+    if (G.state !== "won") return;
+
+    const fade = clamp(G.winTime / 0.45, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = fade;
+
+    ctx.fillStyle = "rgba(4, 12, 7, 0.74)";
+    ctx.fillRect(0, 0, W, H);
+
+    const glow = ctx.createRadialGradient(W / 2, H / 2 - 20, 10, W / 2, H / 2 - 20, 470);
+    glow.addColorStop(0, "rgba(255, 225, 128, 0.18)");
+    glow.addColorStop(0.45, "rgba(107, 213, 124, 0.08)");
+    glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    // 顶部的两色光线
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 2; i++) {
+      const color = i === 0 ? "rgba(255, 215, 0, 0.32)" : "rgba(255, 165, 0, 0.25)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 260 + i * 520, 0);
+      ctx.quadraticCurveTo(W / 2 + (i ? 120 : -120), H / 2 - 130, W / 2, H / 2 - 40);
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = "source-over";
+
+    // 中心徽记
+    const pulse = 0.5 + 0.5 * Math.sin(t * 3);
+    ctx.strokeStyle = `rgba(255, 225, 137, ${0.35 + pulse * 0.2})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(W / 2, 266, 82 + pulse * 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(W / 2, 266, 94, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = '900 70px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "#ffe485";
+    ctx.shadowColor = "rgba(255, 203, 79, 0.72)";
+    ctx.shadowBlur = 34;
+    ctx.fillText("通关成功！", W / 2, 270);
+
+    ctx.shadowBlur = 0;
+    ctx.font = '500 19px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(238, 245, 210, 0.92)";
+    ctx.fillText("大黄与小黄一起抵达了森林之门", W / 2, 338);
+
+    ctx.font = '500 13px "Microsoft YaHei", "PingFang SC", sans-serif';
+    ctx.fillStyle = "rgba(201, 223, 189, 0.7)";
+    ctx.fillText("按 R 或点击画面重新开始", W / 2, 392);
+
+    // 两个角色的小剪影
+    ctx.fillStyle = "rgba(255, 215, 0, 0.9)";
+    roundRectPath(W / 2 - 46, 424, 22, 44, 8);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 165, 0, 0.9)";
+    roundRectPath(W / 2 + 24, 438, 22, 30, 9);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // ============================================================
+  // 总绘制
+  // ============================================================
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+
+    drawBackground(t);
+    drawGoal(t);
+
+    for (const platform of PLATFORMS) {
+      drawPlatform(platform);
+    }
+
+    drawSwitchBeams(t);
+    drawPlate(RED_PLATE, G.redPressed, t);
+    drawPlate(BLUE_PLATE, G.bluePressed, t);
+    drawDoor(t);
+
+    drawPlayers(t);
+    drawParticles();
+    drawForegroundAtmosphere(t);
+    drawVignette();
+    drawHUD(t);
+    drawWinOverlay(t);
+  }
+
+  // ============================================================
+  // requestAnimationFrame 固定步长循环
+  // ============================================================
+
+  let lastTimestamp = performance.now();
+  let accumulator = 0;
+
+  function frame(timestamp) {
+    const elapsed = Math.min(timestamp - lastTimestamp, 100);
+    lastTimestamp = timestamp;
+    accumulator += elapsed;
+
+    let steps = 0;
+    while (accumulator >= STEP_MS && steps < 5) {
+      update();
+      accumulator -= STEP_MS;
+      steps++;
+    }
+
+    // 如果浏览器长时间卡顿，丢弃剩余积压，避免“追帧”造成瞬移。
+    if (steps === 5) accumulator = 0;
+
+    draw(G.time + accumulator / STEP_MS);
+    requestAnimationFrame(frame);
+  }
+
+  // 启动
+  resetLevel({ silent: true });
+  showToast("小黄钻矮缝踩红板，大黄跳高台踩蓝板；同时踩住 0.8 秒解锁出口！", 4.2, "#e9f4c7");
+  canvas.focus();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
